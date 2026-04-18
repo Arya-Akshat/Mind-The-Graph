@@ -1,218 +1,167 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Crowd Movement Simulation — Interactive Dashboard</title>
-    <meta name="description" content="Interactive visualization of crowd movement simulation using Markov Chains and Graph Theory for a metro station environment.">
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="style.css">
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>MetroFlow — Crowd Simulation</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"></script>
+  <link rel="stylesheet" href="styles.css">
 </head>
 <body>
-    <!-- ═══ HEADER ═══ -->
-    <header id="main-header">
-        <div class="header-content">
-            <div class="header-left">
-                <div class="logo-icon">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                        <circle cx="12" cy="12" r="3"/>
-                        <path d="M12 2v4m0 12v4M2 12h4m12 0h4"/>
-                        <path d="m4.93 4.93 2.83 2.83m8.48 8.48 2.83 2.83M4.93 19.07l2.83-2.83m8.48-8.48 2.83-2.83"/>
-                    </svg>
-                </div>
-                <div>
-                    <h1>Crowd Movement Simulation</h1>
-                    <p class="subtitle">Markov Chains & Graph Theory — Metro Station Model</p>
-                </div>
-            </div>
-            <div class="header-right">
-                <div class="header-badge" id="status-badge">
-                    <span class="pulse"></span>
-                    Loading Data...
-                </div>
-            </div>
+
+  <!-- Title + System Status -->
+  <header class="header">
+    <div class="h-left">
+      <h1 class="logo">Metro<span class="hl">Flow</span></h1>
+      <p class="sub">Crowd Movement Simulation</p>
+    </div>
+    <div class="sys-status" id="sys-status">
+      <span class="sys-dot" id="sys-dot"></span>
+      <span id="sys-label">Loading…</span>
+    </div>
+  </header>
+
+  <!-- What is this -->
+  <div class="explainer">
+    <p>This simulation shows how <b>people move through a metro station</b>.</p>
+    <span class="tag">● Circles = locations</span>
+    <span class="tag">─ Lines = walking paths</span>
+    <span class="tag"><span class="g">●</span>→<span class="y">●</span>→<span class="r">●</span> Color = crowd level</span>
+    <span class="tag">↗ Arrows = direction</span>
+  </div>
+
+  <!-- Controls -->
+  <div class="controls">
+    <button class="btn btn-primary" id="btn-play">▶ Start Baseline</button>
+    <button class="btn" id="btn-pause" disabled>⏸ Pause</button>
+    <button class="btn" id="btn-step" disabled>⏭ Step</button>
+    <button class="btn" id="btn-reset" disabled>⟲ Reset</button>
+    <div class="sep"></div>
+    <div class="speed-group" id="speed-group">
+      <span class="speed-lbl">Speed:</span>
+      <button class="sbtn" data-speed="900">Slow</button>
+      <button class="sbtn active" data-speed="600">Normal</button>
+      <button class="sbtn" data-speed="350">Fast</button>
+    </div>
+    <div class="sep"></div>
+    <span class="phase-badge" id="phase-badge">Ready</span>
+    <div class="sep"></div>
+    <span class="frame-num" id="frame-display">0 / 0</span>
+    <div class="pbar"><div class="pfill" id="progress-fill"></div></div>
+  </div>
+
+  <!-- Auto-pause message -->
+  <div class="pause-msg hidden" id="pause-msg">
+    <span class="pause-icon">⏸</span>
+    <span class="pause-text" id="pause-text">Paused</span>
+    <button class="btn btn-primary btn-sm" id="btn-continue">▶ Continue</button>
+  </div>
+
+  <!-- Step narration + flow -->
+  <div class="info-bar">
+    <p class="narration" id="narration">Press Start to watch how crowd moves through the station.</p>
+    <p class="flow-line" id="flow-line">Main flow: —</p>
+  </div>
+
+  <!-- Main layout -->
+  <div class="main">
+
+    <!-- Canvas graph -->
+    <div class="graph-col">
+      <p class="graph-hint">Watch how people move from entries to exits and where crowd builds up.</p>
+      <p class="key-insight" id="key-insight"></p>
+      <div class="graph-box" id="graph-container">
+        <canvas id="canvas-network"></canvas>
+      </div>
+      <div id="graph-tooltip" class="tooltip hidden"></div>
+      <div id="node-popup" class="node-popup hidden"></div>
+    </div>
+
+    <!-- Right panel -->
+    <aside class="side">
+
+      <!-- Mode card -->
+      <div class="card">
+        <div class="ch" id="mode-title">Baseline</div>
+        <p class="cb" id="mode-desc">People move randomly — no routing preference.</p>
+      </div>
+
+      <!-- Structured live status -->
+      <div class="card" id="status-card">
+        <div class="ch">What's Happening</div>
+        <div class="status-section">
+          <span class="status-label">Flow</span>
+          <span class="cb" id="st-flow">—</span>
         </div>
-    </header>
+        <div class="status-section">
+          <span class="status-label">Pressure</span>
+          <span class="cb" id="st-pressure">—</span>
+        </div>
+        <div class="status-section">
+          <span class="status-label">Impact</span>
+          <span class="cb" id="st-impact">—</span>
+        </div>
+      </div>
 
-    <!-- ═══ MAIN CONTENT ═══ -->
-    <main id="app-main">
-        <!-- ─── Stats Bar ─── -->
-        <section class="stats-bar" id="stats-bar">
-            <div class="stat-card" id="stat-nodes">
-                <div class="stat-value">—</div>
-                <div class="stat-label">Nodes</div>
-            </div>
-            <div class="stat-card" id="stat-edges">
-                <div class="stat-value">—</div>
-                <div class="stat-label">Edges</div>
-            </div>
-            <div class="stat-card" id="stat-steps">
-                <div class="stat-value">—</div>
-                <div class="stat-label">Time Steps</div>
-            </div>
-            <div class="stat-card" id="stat-bottlenecks">
-                <div class="stat-value">—</div>
-                <div class="stat-label">Bottlenecks</div>
-            </div>
-            <div class="stat-card accent" id="stat-improvement">
-                <div class="stat-value">—</div>
-                <div class="stat-label">Congestion Reduction</div>
-            </div>
-        </section>
+      <!-- What changed -->
+      <div class="card" id="change-card">
+        <div class="ch">What Changed</div>
+        <p class="cb" id="change-text">Waiting for simulation…</p>
+      </div>
 
-        <!-- ─── Graph + Controls ─── -->
-        <section class="grid-2col">
-            <div class="card" id="graph-card">
-                <div class="card-header">
-                    <h2>Station Graph</h2>
-                    <div class="toggle-group">
-                        <button class="toggle-btn active" data-view="before" id="btn-view-before">Original</button>
-                        <button class="toggle-btn" data-view="after" id="btn-view-after">Optimized</button>
-                    </div>
-                </div>
-                <canvas id="graph-canvas" width="700" height="450"></canvas>
-                <div class="canvas-legend" id="graph-legend">
-                    <span class="legend-item"><span class="dot entrance"></span>Entrance</span>
-                    <span class="legend-item"><span class="dot exit"></span>Exit</span>
-                    <span class="legend-item"><span class="dot gate"></span>Gate</span>
-                    <span class="legend-item"><span class="dot corridor"></span>Corridor</span>
-                    <span class="legend-item"><span class="dot platform"></span>Platform</span>
-                </div>
-            </div>
+      <!-- Simple metrics -->
+      <div class="card">
+        <div class="ch">Metrics</div>
+        <div class="mrow"><span>Traffic Level</span><b id="m-traffic" class="pill">—</b></div>
+        <div class="mrow"><span>Travel Speed</span><b id="m-speed">—</b></div>
+        <div class="mrow"><span>Waiting</span><b id="m-wait">—</b></div>
+        <div class="mrow sm"><span>Avg travel</span><span id="m-travel-n">—</span></div>
+        <div class="mrow sm"><span>Throughput</span><span id="m-thru-n">—</span></div>
+      </div>
 
-            <div class="card" id="controls-card">
-                <div class="card-header">
-                    <h2>Simulation Controls</h2>
-                </div>
-                <div class="control-group">
-                    <label for="time-slider">Time Step</label>
-                    <div class="slider-row">
-                        <input type="range" id="time-slider" min="0" max="20" value="0" step="1">
-                        <span class="slider-value" id="time-value">t = 0</span>
-                    </div>
-                </div>
-                <div class="control-group">
-                    <label>Playback</label>
-                    <div class="btn-row">
-                        <button class="btn btn-primary" id="btn-play">▶ Play</button>
-                        <button class="btn btn-secondary" id="btn-pause">⏸ Pause</button>
-                        <button class="btn btn-secondary" id="btn-reset">⏮ Reset</button>
-                    </div>
-                </div>
-                <div class="control-group">
-                    <label for="speed-slider">Animation Speed</label>
-                    <div class="slider-row">
-                        <input type="range" id="speed-slider" min="100" max="2000" value="500" step="100">
-                        <span class="slider-value" id="speed-value">500ms</span>
-                    </div>
-                </div>
-                <hr class="divider">
-                <div class="card-header sub">
-                    <h3>Current Distribution</h3>
-                </div>
-                <div class="distribution-list" id="distribution-list">
-                    <!-- Filled by JS -->
-                </div>
-            </div>
-        </section>
+      <!-- Legend -->
+      <div class="card">
+        <div class="ch">Legend</div>
+        <div class="lr"><span class="dot" style="background:#22c55e"></span>Free</div>
+        <div class="lr"><span class="dot" style="background:#eab308"></span>Moderate</div>
+        <div class="lr"><span class="dot" style="background:#ef4444"></span>Crowded</div>
+        <div class="lr"><span class="dot" style="background:#60A5FA"></span>Entry point</div>
+        <div class="lr"><span class="dot" style="background:#A78BFA"></span>Exit point</div>
+        <div class="lr"><span class="lline"></span>Walking path</div>
+        <div class="lr"><span class="larr">→</span>Direction</div>
+        <div class="lr"><span style="color:#ef4444;font-size:.75rem">⚠</span>Bottleneck node</div>
+      </div>
 
-        <!-- ─── Density Heatmap ─── -->
-        <section class="card full-width" id="heatmap-card">
-            <div class="card-header">
-                <h2>Crowd Density Heatmap</h2>
-                <div class="toggle-group">
-                    <button class="toggle-btn active" data-heatmap="before" id="btn-heat-before">Before</button>
-                    <button class="toggle-btn" data-heatmap="after" id="btn-heat-after">After</button>
-                    <button class="toggle-btn" data-heatmap="diff" id="btn-heat-diff">Difference</button>
-                </div>
-            </div>
-            <canvas id="heatmap-canvas" width="900" height="350"></canvas>
-        </section>
+    </aside>
+  </div>
 
-        <!-- ─── Comparison Charts ─── -->
-        <section class="grid-2col">
-            <div class="card" id="stationary-card">
-                <div class="card-header">
-                    <h2>Stationary Distribution (π)</h2>
-                </div>
-                <canvas id="stationary-canvas" width="500" height="300"></canvas>
-            </div>
+  <!-- One chart -->
+  <div class="chart-section">
+    <div class="card ccard">
+      <div class="ch">Occupancy Over Time</div>
+      <div class="chart-wrap"><canvas id="occ-chart"></canvas></div>
+    </div>
+  </div>
 
-            <div class="card" id="mfpt-card">
-                <div class="card-header">
-                    <h2>Mean Steps to Exit</h2>
-                </div>
-                <canvas id="mfpt-canvas" width="500" height="300"></canvas>
-            </div>
-        </section>
+  <!-- Comparison -->
+  <div class="cmp-section">
+    <div class="card">
+      <div class="ch">Mode Comparison</div>
+      <table class="cmp"><thead><tr><th>Metric</th><th>Base</th><th>Biased</th><th>Selfish</th><th>Optimal</th></tr></thead><tbody id="cmp-tbody"></tbody></table>
+    </div>
+  </div>
 
-        <!-- ─── Transition Matrix ─── -->
-        <section class="card full-width" id="matrix-card">
-            <div class="card-header">
-                <h2>Transition Matrix</h2>
-                <div class="toggle-group">
-                    <button class="toggle-btn active" data-matrix="before" id="btn-matrix-before">Original</button>
-                    <button class="toggle-btn" data-matrix="after" id="btn-matrix-after">Optimized</button>
-                </div>
-            </div>
-            <canvas id="matrix-canvas" width="700" height="500"></canvas>
-        </section>
+  <!-- End-of-run overlay -->
+  <div class="overlay hidden" id="end-overlay">
+    <div class="overlay-card">
+      <div class="overlay-title" id="overlay-title">Simulation Complete</div>
+      <div class="overlay-body" id="overlay-body"></div>
+      <div class="overlay-actions" id="overlay-actions"></div>
+    </div>
+  </div>
 
-        <!-- ─── Mathematical Details ─── -->
-        <section class="card full-width" id="math-card">
-            <div class="card-header">
-                <h2>Mathematical Foundation</h2>
-            </div>
-            <div class="math-grid">
-                <div class="math-block">
-                    <h3>Graph Model</h3>
-                    <p>The metro station is modeled as an undirected weighted graph <strong>G = (V, E, w)</strong> where:</p>
-                    <ul>
-                        <li><strong>V</strong> = set of 16 nodes (physical locations)</li>
-                        <li><strong>E</strong> = set of 25 edges (walkable paths)</li>
-                        <li><strong>w: E → ℝ⁺</strong> = edge weights (distances)</li>
-                    </ul>
-                </div>
-                <div class="math-block">
-                    <h3>Markov Chain</h3>
-                    <p>Crowd movement follows a discrete-time Markov chain with:</p>
-                    <ul>
-                        <li><strong>State</strong> = current node of a person</li>
-                        <li><strong>T</strong> = row-stochastic transition matrix</li>
-                        <li><strong>P(t+1) = P(t) · T</strong> (evolution equation)</li>
-                        <li><strong>π = π · T</strong> (stationary distribution)</li>
-                    </ul>
-                </div>
-                <div class="math-block">
-                    <h3>Optimization</h3>
-                    <p>Three strategies applied to reduce congestion:</p>
-                    <ul>
-                        <li><strong>Exit Acceleration</strong> — Stronger bias toward exits</li>
-                        <li><strong>Bottleneck Relief</strong> — Redistribute flow away from congested nodes</li>
-                        <li><strong>Path Splitting</strong> — Balance load across parallel corridors</li>
-                    </ul>
-                </div>
-            </div>
-        </section>
-
-        <!-- ─── Key Observations ─── -->
-        <section class="card full-width" id="observations-card">
-            <div class="card-header">
-                <h2>Key Observations</h2>
-            </div>
-            <div class="observations" id="observations-content">
-                <!-- Filled by JS -->
-            </div>
-        </section>
-    </main>
-
-    <!-- ═══ FOOTER ═══ -->
-    <footer id="app-footer">
-        <p>Mathematical Modelling — Crowd Movement using Markov Chains & Graph Theory</p>
-    </footer>
-
-    <script src="app.js"></script>
+  <script src="app.js"></script>
 </body>
 </html>
