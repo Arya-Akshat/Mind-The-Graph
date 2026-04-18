@@ -90,25 +90,37 @@
 
       <!-- Structured live status -->
       <div class="card" id="status-card">
-        <div class="ch">What's Happening</div>
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
+            <div class="ch" style="margin:0;">What's Happening</div>
+            <span id="story-tag" class="pill" style="font-size:0.7rem; background:#334155; padding:2px 8px;">—</span>
+        </div>
+        
         <div class="status-section">
-          <span class="status-label">Flow</span>
-          <span class="cb" id="st-flow">—</span>
+          <span class="status-label" style="text-transform:uppercase; font-size:0.65rem; color:var(--cyan);">Current Scene</span>
+          <span class="cb" id="st-scene">—</span>
         </div>
         <div class="status-section">
-          <span class="status-label">Pressure</span>
-          <span class="cb" id="st-pressure">—</span>
+          <span class="status-label" style="text-transform:uppercase; font-size:0.65rem; color:var(--mt);">Cause</span>
+          <span class="cb" id="st-cause">—</span>
         </div>
         <div class="status-section">
-          <span class="status-label">Impact</span>
-          <span class="cb" id="st-impact">—</span>
+          <span class="status-label" style="text-transform:uppercase; font-size:0.65rem; color:var(--mt);">Effect</span>
+          <span class="cb" id="st-effect">—</span>
+        </div>
+        <div class="status-section" style="margin-top:12px; padding-top:12px; border-top:1px solid #1e293b;">
+          <span class="status-label" style="text-transform:uppercase; font-size:0.65rem; color:#A78BFA;">What this means</span>
+          <span class="cb" id="st-takeaway" style="font-weight:500; color:var(--tx);">—</span>
         </div>
       </div>
 
-      <!-- What changed -->
-      <div class="card" id="change-card">
-        <div class="ch">What Changed</div>
-        <p class="cb" id="change-text">Waiting for simulation…</p>
+      <!-- Why Optimization Works -->
+      <div class="card hidden" id="opt-expl-card">
+        <div class="ch">Why Optimization Works</div>
+        <ul class="cb" style="padding-left:16px;margin:8px 0;line-height:1.4">
+          <li id="opt-reason-1" style="margin-bottom:8px">—</li>
+          <li id="opt-reason-2" style="margin-bottom:8px">—</li>
+          <li id="opt-reason-3">—</li>
+        </ul>
       </div>
 
       <!-- Simple metrics -->
@@ -137,10 +149,27 @@
     </aside>
   </div>
 
+  <!-- Decision Vis -->
+  <div class="decision-section hidden" id="decision-panel">
+    <div class="card dec-card">
+      <div class="ch">Why this route was chosen</div>
+      <div id="dec-from" style="font-size:0.75rem; color:var(--cyan); margin-bottom:12px; letter-spacing:0.05em; font-weight:600;">FROM: —</div>
+      
+      <div id="dec-options-list" class="dec-list" style="margin-bottom:12px; display:flex; flex-direction:column; gap:8px;">
+         <!-- Dynamic generation here -->
+      </div>
+      
+      <div id="dec-reasoning" style="font-size:0.75rem; color:var(--tx); line-height:1.5;">
+         <!-- Dynamic reasoning -->
+      </div>
+    </div>
+  </div>
+
   <!-- One chart -->
   <div class="chart-section">
     <div class="card ccard">
-      <div class="ch">Occupancy Over Time</div>
+      <div class="ch">How crowd builds over time</div>
+      <p class="cb" style="margin-bottom:8px; font-size:0.75rem; color:var(--mt);">This shows how crowded key areas become during the simulation.</p>
       <div class="chart-wrap"><canvas id="occ-chart"></canvas></div>
     </div>
   </div>

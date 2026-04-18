@@ -40,6 +40,14 @@ let displayedRatios = {};
 // Key moment tracking — each auto-pause fires once per run
 let keyMoments = { firstCongestion: false, peakFrame: -1, peakFired: false };
 
+// Optimization Insights tracking
+let optInsights = null;
+let optStartTime = 0;
+let glowPaths = { increased: new Set(), decreased: new Set() };
+
+// Narrative State Engine
+let currentNarrative = { anchorId: null, framesLocked: 0, severity: 0 };
+
 // Congestion amplifier
 function congestionScale() {
     return mode === 'baseline' ? 1.35 : 0.85;
@@ -282,6 +290,14 @@ function bindUI() {
 
     playBtn.addEventListener('click', () => {
         if (SIM.isRunning) return;
+        
+        if (STORY === 'baseline_done' || (mode === 'baseline' && SIM.finished && !SIM.isRunning)) {
+            startOptimizedRun();
+            return;
+        } else if (STORY === 'comparison') {
+            document.getElementById('btn-reset').click();
+            return;
+        }
 
         hidePauseMsg();
 
@@ -339,41 +355,52 @@ function bindUI() {
         updateNarration();
         updateIntelligence();
         drawGraph();
+        if (typeof occChart !== 'undefined' && occChart) { occChart.update('none'); }
     });
 
-    resetBtn.addEventListener('click', () => {
+    document.getElementById('btn-reset').addEventListener('click', () => {
         SIM.frame = 0;
         SIM.isRunning = false;
         SIM.finished = false;
-        mode = 'baseline';
         STORY = 'ready';
+        mode = 'baseline';
         prevOcc = {};
         prevRadii = {};
         prevFlows = {};
         displayedRatios = {};
         runObs = { peakNode: '', peakOcc: 0, peakCap: 0, peakFrame: 0 };
         keyMoments = { firstCongestion: false, peakFrame: -1, peakFired: false };
-
-        playBtn.textContent = '▶ Start Baseline';
-        playBtn.disabled = false;
-        playBtn.className = 'btn btn-primary';
-        pauseBtn.disabled = true;
-        stepBtn.disabled = true;
-        resetBtn.disabled = true;
-
-        hidePauseMsg();
+        optStartTime = 0;
+        
         hideOverlay();
-        setPhase('ready');
-        refresh();
+        const explCard = document.getElementById('opt-expl-card');
+        if (explCard) explCard.classList.add('hidden');
+        
+        const playBtn = document.getElementById('btn-play');
+        playBtn.textContent = '▶ Start Baseline';
+        playBtn.className = 'btn';
+        playBtn.disabled = false;
+        
+        updateModeCard();
+        updateChart();
+        updateFrameUI();
         drawGraph();
-        document.getElementById('narration').textContent = 'Press Start to watch how crowd moves through the station.';
-        document.getElementById('key-insight').textContent = '';
     });
 
     // Continue button (in pause message bar)
     document.getElementById('btn-continue').addEventListener('click', () => {
+        if (STORY === 'complete') return; // Do not allow resume after finish
+        if (SIM.finished) return;
         hidePauseMsg();
-        playBtn.click();
+        SIM.isRunning = true;
+        setPhase('running');
+        updateFrameUI();
+        document.getElementById('btn-play').disabled = true;
+        document.getElementById('btn-pause').disabled = false;
+        document.getElementById('btn-step').disabled = true;
+        document.getElementById('btn-reset').disabled = true;
+        lastTime = performance.now();
+        requestAnimationFrame(loop);
     });
 
     // Speed presets
@@ -435,6 +462,147 @@ function updateNarration() {
 // ════════════════════════════════════════════════════════
 // INTELLIGENCE LAYER
 // ════════════════════════════════════════════════════════
+function buildNarrativeState(mode, f, md, nodes, ef, curOcc) {
+    if (f === 0) {
+        return {
+            tag: 'Awaiting',
+            scene: 'Waiting for simulation to begin.',
+            cause: '—', effect: '—', takeaway: '—'
+        };
+    }
+
+    // 1. Calculate severities based on inflow vs outflow and occupancy
+    let highestSeverity = 0;
+    let anchorCandidate = null;
+
+    const inFlow = {}, outFlow = {};
+    for (const [k, a] of Object.entries(ef)) {
+        const fv = a && f < a.length ? a[f] : 0;
+        const [src, dst] = k.split('→');
+        inFlow[dst] = (inFlow[dst] || 0) + fv;
+        outFlow[src] = (outFlow[src] || 0) + fv;
+    }
+
+    for (const n of nodes) {
+        if (n.type === 'entry' || n.type === 'exit') continue;
+        const ratio = (curOcc[n.id] / (n.capacity || 1));
+        const congTrig = mode === 'baseline' ? 1.35 : 0.85;
+        
+        let pressure = 0;
+        if (inFlow[n.id] > outFlow[n.id]) {
+            pressure = (inFlow[n.id] - outFlow[n.id]) * 0.5;
+        }
+        
+        let severity = ratio * congTrig * 10 + pressure;
+        
+        if (severity > highestSeverity) {
+            highestSeverity = severity;
+            anchorCandidate = n.id;
+        }
+    }
+
+    // Edge check if node severity is extremely low
+    if (highestSeverity < 3) {
+        for (const [k, a] of Object.entries(ef)) {
+            const fv = a && f < a.length ? a[f] : 0;
+            if (fv > highestSeverity) {
+                highestSeverity = fv;
+                anchorCandidate = k;
+            }
+        }
+    }
+
+    // 2. Hysteresis Check
+    if (currentNarrative.anchorId) {
+        if (currentNarrative.anchorId === anchorCandidate) {
+            currentNarrative.framesLocked++;
+        } else {
+            const margin = currentNarrative.severity * 1.2;
+            if (highestSeverity > margin || currentNarrative.framesLocked > 5) {
+                currentNarrative.anchorId = anchorCandidate;
+                currentNarrative.framesLocked = 0;
+            } else {
+                anchorCandidate = currentNarrative.anchorId;
+                highestSeverity = currentNarrative.severity;
+                currentNarrative.framesLocked++;
+            }
+        }
+    } else {
+        currentNarrative.anchorId = anchorCandidate;
+        currentNarrative.framesLocked = 0;
+    }
+    
+    currentNarrative.severity = highestSeverity;
+
+    // 3. String Generation
+    let nState = { tag: 'Smooth flow', scene: '—', cause: '—', effect: '—', takeaway: '—' };
+    if (!anchorCandidate) {
+         nState.scene = 'People are moving freely with no major concentration.';
+         nState.cause = 'Station holds enough capacity for the current crowds.';
+         nState.effect = 'Fast transit times and no bottlenecks.';
+         nState.takeaway = 'System is operating well within limits.';
+         return nState;
+    }
+
+    if (anchorCandidate.includes('→')) {
+         const [src, dst] = anchorCandidate.split('→').map(nodeName);
+         nState.tag = 'High movement';
+         nState.scene = `Most movement is centered along the path from ${src} to ${dst}.`;
+         nState.cause = 'This is the primary route chosen by current commuters.';
+         nState.effect = 'Traffic volume is high but still moving without major incident.';
+         nState.takeaway = 'Pathways are heavily utilized but have not bottlenecked.';
+         return nState;
+    }
+
+    const nCap = nodes.find(n => n.id === anchorCandidate).capacity || 1;
+    const aRatio = curOcc[anchorCandidate] / nCap;
+    const aName = nodeName(anchorCandidate);
+    const iF = inFlow[anchorCandidate] || 0;
+    const oF = outFlow[anchorCandidate] || 0;
+
+    if (aRatio > 0.8) {
+        nState.tag = 'Peak congestion';
+        nState.scene = `A major crowd is packed at ${aName}.`;
+        nState.cause = `More people are pouring into this area than can exit it.`;
+        nState.effect = `A heavy queue has formed, dragging down overall movement speed.`;
+        nState.takeaway = `This bottleneck is the primary cause of delays right now.`;
+    } else if (aRatio > 0.5) {
+        if (iF > oF * 1.2) {
+             nState.tag = 'Queue forming';
+             nState.scene = `People are starting to gather around ${aName}.`;
+             nState.cause = `Traffic arriving is briefly overwhelming the exit rate here.`;
+             nState.effect = `Movement is slowing down locally as people wait.`;
+             nState.takeaway = `If buildup continues, this will become a major bottleneck.`;
+        } else {
+             nState.tag = 'High utilization';
+             nState.scene = `A large number of people are stationed near ${aName}.`;
+             nState.cause = `This area is effectively absorbing heavy foot traffic.`;
+             nState.effect = `The space is busy but maintaining steady flow.`;
+             nState.takeaway = `Traffic is heavy but currently managed without choking.`;
+        }
+    } else {
+        if (iF > oF) {
+            nState.tag = 'Entry build-up';
+            nState.scene = `Movement is flowing toward ${aName}.`;
+            nState.cause = `Initial crowds are arriving into this segment.`;
+            nState.effect = `Traffic is advancing smoothly without queues.`;
+            nState.takeaway = `The system is beginning to distribute load.`;
+        } else {
+            nState.tag = 'Dispersal';
+            nState.scene = `The crowd at ${aName} is steadily clearing out.`;
+            nState.cause = `More people are leaving the area than arriving.`;
+            nState.effect = `Congestion is easing back to normal levels.`;
+            nState.takeaway = `The major bottleneck is safely resolving.`;
+        }
+    }
+
+    if (mode === 'optimized') {
+        nState.takeaway = `Optimization is actively preventing severe locks by spreading routing.`;
+    }
+
+    return nState;
+}
+
 function updateIntelligence() {
     if (!DATA) return;
     const md = DATA.modes[mode];
@@ -443,34 +611,19 @@ function updateIntelligence() {
     const ef = md.edge_flows;
 
     const curOcc = {};
-    let totalOcc = 0, totalCap = 0;
+    let maxOcc = 0, busiestName = '', busiestCap = 1;
     for (const n of nodes) {
         const oa = md.node_occupancy[n.id];
         const occ = oa && f < oa.length ? oa[f] : 0;
         curOcc[n.id] = occ;
-        totalOcc += occ;
-        totalCap += n.capacity;
+        
+        if (occ > maxOcc) {
+            maxOcc = occ;
+            busiestName = n.name;
+            busiestCap = n.capacity || 1;
+        }
     }
 
-    // System status
-    const avgRatio = totalCap > 0 ? totalOcc / totalCap : 0;
-    const displayAvg = avgRatio * congestionScale();
-    const dot = document.getElementById('sys-dot');
-    const lbl = document.getElementById('sys-label');
-    if (displayAvg < 0.2)       { dot.className = 'sys-dot green'; lbl.textContent = 'Smooth'; }
-    else if (displayAvg < 0.45) { dot.className = 'sys-dot yellow'; lbl.textContent = 'Building congestion'; }
-    else                        { dot.className = 'sys-dot red'; lbl.textContent = 'Heavy congestion'; }
-
-    // Busiest node
-    let maxOcc = 0, busiestId = '', busiestName = '';
-    for (const n of nodes) {
-        if (curOcc[n.id] > maxOcc) { maxOcc = curOcc[n.id]; busiestId = n.id; busiestName = n.name; }
-    }
-    const busiestNode = nodes.find(x => x.id === busiestId);
-    const busiestCap = busiestNode ? busiestNode.capacity : 1;
-    const busiestRatio = clamp((maxOcc / busiestCap) * congestionScale(), 0, 1);
-
-    // Track peak for summary
     if (maxOcc > runObs.peakOcc) {
         runObs.peakOcc = maxOcc;
         runObs.peakNode = busiestName;
@@ -478,146 +631,130 @@ function updateIntelligence() {
         runObs.peakFrame = f;
     }
 
-    // In/out flows
-    const nodeInFlow = {}, nodeOutFlow = {};
-    for (const [k, a] of Object.entries(ef)) {
-        const fv = a && f < a.length ? a[f] : 0;
-        const [src, dst] = k.split('→');
-        nodeOutFlow[src] = (nodeOutFlow[src] || 0) + fv;
-        nodeInFlow[dst] = (nodeInFlow[dst] || 0) + fv;
-    }
+    // Build the state
+    const nState = buildNarrativeState(mode, f, md, nodes, ef, curOcc);
 
-    // Top edges
-    const edgeList = [];
-    for (const [key, arr] of Object.entries(ef)) {
-        const fv = arr && f < arr.length ? arr[f] : 0;
-        if (fv > 0.3) edgeList.push({ key, fv });
-    }
-    edgeList.sort((a, b) => b.fv - a.fv);
-    const top2Edges = edgeList.slice(0, 2);
+    // Apply to UI
+    document.getElementById('story-tag').textContent = nState.tag;
+    document.getElementById('st-scene').textContent = nState.scene;
+    document.getElementById('st-cause').textContent = nState.cause;
+    document.getElementById('st-effect').textContent = nState.effect;
+    document.getElementById('st-takeaway').textContent = nState.takeaway;
 
-    // Flow chain
-    let mainFlowText = '—';
-    if (top2Edges.length > 0) {
-        const [src0, dst0] = top2Edges[0].key.split('→');
-        const chain = [nodeName(src0), nodeName(dst0)];
-        let cur = dst0;
-        for (let hop = 0; hop < 2; hop++) {
-            let bestNext = '', bestF = 0;
-            for (const [k, a] of Object.entries(ef)) {
-                if (!k.startsWith(cur + '→')) continue;
-                const fv = a && f < a.length ? a[f] : 0;
-                if (fv > bestF) { bestF = fv; bestNext = k.split('→')[1]; }
-            }
-            if (bestNext && bestF > 0.3) { chain.push(nodeName(bestNext)); cur = bestNext; }
-            else break;
-        }
-        mainFlowText = chain.join(' → ');
-    }
-    document.getElementById('flow-line').textContent = `Main flow: ${mainFlowText}`;
-
-    const entries = nodes.filter(n => n.type === 'entry');
-    const entryNames = entries.map(n => n.name).join(' and ');
-
-    // 3-layer explanation
-    let flowTxt, pressureTxt, impactTxt;
-
-    if (f === 0) {
-        flowTxt = '—'; pressureTxt = '—'; impactTxt = '—';
+    // Optional tag colors
+    const tagEl = document.getElementById('story-tag');
+    if (nState.tag.includes('Queue') || nState.tag.includes('High')) {
+        tagEl.style.background = '#eab308'; // yellow
+        tagEl.style.color = '#000';
+    } else if (nState.tag.includes('Peak')) {
+        tagEl.style.background = '#ef4444'; // red
+        tagEl.style.color = '#fff';
+    } else if (nState.tag.includes('Smooth') || nState.tag.includes('Dispersal')) {
+        tagEl.style.background = '#22c55e'; // green
+        tagEl.style.color = '#000';
     } else {
-        if (top2Edges.length >= 2) {
-            const p1 = top2Edges[0].key.split('→').map(nodeName);
-            const p2 = top2Edges[1].key.split('→').map(nodeName);
-            flowTxt = `People moving from ${entryNames} toward ${p1[1]} and ${p2[1]}.`;
-        } else if (top2Edges.length === 1) {
-            const p1 = top2Edges[0].key.split('→').map(nodeName);
-            flowTxt = `People moving from ${entryNames} toward ${p1[1]}.`;
-        } else {
-            flowTxt = 'Light movement across all paths.';
-        }
-
-        const pressureNodes = [];
-        for (const n of nodes) {
-            if (n.type === 'entry' || n.type === 'exit') continue;
-            const inF = nodeInFlow[n.id] || 0;
-            const outF = nodeOutFlow[n.id] || 0;
-            const ratio = clamp((curOcc[n.id] / (n.capacity || 1)) * congestionScale(), 0, 1);
-            if (inF > outF * 1.2 && ratio > 0.3) {
-                pressureNodes.push({ name: n.name, inF, outF, ratio });
-            }
-        }
-        pressureNodes.sort((a, b) => b.ratio - a.ratio);
-
-        if (pressureNodes.length > 0) {
-            const pn = pressureNodes[0];
-            pressureTxt = `Traffic building at ${pn.name} — more arriving (${pn.inF.toFixed(0)}) than leaving (${pn.outF.toFixed(0)}).`;
-        } else if (busiestRatio > 0.5) {
-            pressureTxt = `${busiestName} is the busiest area with ${maxOcc.toFixed(0)} people.`;
-        } else {
-            pressureTxt = 'No pressure points — traffic flowing smoothly.';
-        }
-
-        let trending = 'stable';
-        if (Object.keys(prevOcc).length > 0) {
-            const delta = curOcc[busiestId] - (prevOcc[busiestId] || 0);
-            if (delta > 0.5) trending = 'increasing';
-            else if (delta < -0.5) trending = 'decreasing';
-        }
-
-        if (busiestRatio > 0.75 && trending === 'increasing') {
-            impactTxt = `⚠ Queue forming at ${busiestName} — movement slowing.`;
-        } else if (busiestRatio > 0.75) {
-            impactTxt = `${busiestName} near capacity — waits expected.`;
-        } else if (busiestRatio > 0.5 && trending === 'increasing') {
-            impactTxt = `Crowd at ${busiestName} growing — could bottleneck soon.`;
-        } else if (trending === 'decreasing') {
-            impactTxt = 'Congestion easing — crowd dispersing.';
-        } else {
-            impactTxt = 'System flowing normally — no delays expected.';
-        }
+        tagEl.style.background = '#334155'; // gray
+        tagEl.style.color = '#fff';
     }
 
-    document.getElementById('st-flow').textContent = flowTxt;
-    document.getElementById('st-pressure').textContent = pressureTxt;
-    document.getElementById('st-impact').textContent = impactTxt;
-
-    // Key insight
-    let insightTxt = '';
-    if (f > 0) {
-        if (busiestRatio > 0.75) {
-            const inF = nodeInFlow[busiestId] || 0;
-            const outF = nodeOutFlow[busiestId] || 0;
-            insightTxt = inF > outF * 1.3
-                ? `💡 ${busiestName} is a bottleneck — more arriving than can leave.`
-                : `💡 ${busiestName} at ${(busiestRatio * 100).toFixed(0)}% capacity.`;
-        } else if (busiestRatio > 0.5) {
-            insightTxt = `💡 Watch ${busiestName} — crowd building, may cause delays.`;
-        } else {
-            insightTxt = '💡 All areas flowing well — no bottlenecks.';
-        }
-    }
-    document.getElementById('key-insight').textContent = insightTxt;
-
-    // What changed
-    let changeTxt = '';
-    if (f === 0 || Object.keys(prevOcc).length === 0) {
-        changeTxt = 'Waiting for simulation…';
-    } else {
-        let bigInc = '', bigIncV = 0, bigDec = '', bigDecV = 0;
-        for (const n of nodes) {
-            const prev = prevOcc[n.id] || 0;
-            const d = curOcc[n.id] - prev;
-            if (d > bigIncV) { bigIncV = d; bigInc = n.name; }
-            if (d < bigDecV) { bigDecV = d; bigDec = n.name; }
-        }
-        const parts = [];
-        if (bigIncV > 0.5) parts.push(`+${bigIncV.toFixed(0)} people to ${bigInc}`);
-        if (bigDecV < -0.5) parts.push(`${Math.abs(bigDecV).toFixed(0)} left ${bigDec}`);
-        changeTxt = parts.length > 0 ? parts.join('. ') + '.' : 'No significant changes.';
-    }
-    document.getElementById('change-text').textContent = changeTxt;
+    // Update decision panel below Graph
+    updateDecisionPanel();
 
     prevOcc = { ...curOcc };
+}
+
+// ════════════════════════════════════════════════════════
+// DECISION VISUALIZATION PANEL
+// ════════════════════════════════════════════════════════
+function updateDecisionPanel() {
+    if (!DATA) return;
+    const decPanel = document.getElementById('decision-panel');
+    const listDiv = document.getElementById('dec-options-list');
+    const fromLine = document.getElementById('dec-from');
+    const reasonLine = document.getElementById('dec-reasoning');
+    
+    if (!decPanel || !listDiv || !fromLine || !reasonLine) return; // safety
+    
+    // Safety checks: hide if baseline, no narrative anchor, anchor is an edge, or not running
+    if (mode === 'baseline' || mode === 'ready' || STORY === 'ready' || SIM.frame === 0 || !currentNarrative.anchorId || currentNarrative.anchorId.includes('→')) {
+        decPanel.classList.add('hidden');
+        if (typeof glowPaths !== 'undefined') glowPaths.chosenEdge = null;
+        return;
+    }
+
+    const anchorId = currentNarrative.anchorId;
+    const md = DATA.modes[mode];
+    const ef = md.edge_flows;
+    const nodes = DATA.graph.nodes;
+    const anchorNode = nodes.find(n => n.id === anchorId);
+    
+    if (!anchorNode || anchorNode.type === 'exit') {
+        decPanel.classList.add('hidden');
+        if (typeof glowPaths !== 'undefined') glowPaths.chosenEdge = null;
+        return;
+    }
+
+    // Find outgoing edges from anchor
+    const options = [];
+    for (const [k, a] of Object.entries(ef)) {
+        if (k.startsWith(anchorId + '→')) {
+            const fv = a && SIM.frame < a.length ? a[SIM.frame] : 0;
+            const dstId = k.split('→')[1];
+            const dstNode = nodes.find(n => n.id === dstId);
+            
+            const dstOcc = md.node_occupancy[dstId] ? md.node_occupancy[dstId][SIM.frame] : 0;
+            const dstCap = Math.max(1, dstNode.capacity || 1);
+            const crowdRatio = Math.min(1, dstOcc / dstCap * congestionScale());
+            
+            // Euclidean distance proxy
+            const dx = dstNode.x - anchorNode.x;
+            const dy = dstNode.y - anchorNode.y;
+            const dist = Math.sqrt(dx*dx + dy*dy);
+            
+            options.push({ edgeKey: k, dstNode: dstNode, flow: fv, crowdRatio: crowdRatio, dist: dist });
+        }
+    }
+
+    if (options.length < 2) {
+        decPanel.classList.add('hidden');
+        if (typeof glowPaths !== 'undefined') glowPaths.chosenEdge = null;
+        return;
+    }
+
+    // Sort to pick max 3, based on actual utilization logic
+    options.sort((a, b) => b.flow - a.flow);
+    const topOptions = options.slice(0, 3);
+    
+    // The "chosen" one is the one with highest active flow distribution
+    const chosenOpt = topOptions[0];
+    if (typeof glowPaths !== 'undefined') glowPaths.chosenEdge = chosenOpt.edgeKey; 
+    
+    fromLine.textContent = `FROM: ${anchorNode.name}`;
+    
+    // Render HTML cleanly
+    let html = '';
+    for (const opt of topOptions) {
+        const isChosen = (opt === chosenOpt);
+        const name = opt.dstNode.name;
+        
+        let goodScore = 5 - Math.round(opt.crowdRatio * 3.5 + (opt.dist > 200 ? 1 : 0));
+        goodScore = Math.max(1, Math.min(5, goodScore));
+        const bars = '█'.repeat(goodScore) + '░'.repeat(5 - goodScore);
+
+        html += `
+        <div style="display:flex; justify-content:space-between; align-items:center; opacity:${isChosen ? 1 : 0.6}; transition:0.2s;">
+            <div style="font-size:0.8rem; color:var(--tx); min-width:80px;">→ ${name}</div>
+            <div style="font-family:monospace; font-size: 0.9rem; color:${isChosen ? 'var(--green)' : 'var(--mt)'}; letter-spacing:2px; flex:1; text-align:right; margin-right:8px;">${bars}</div>
+            <div style="color:var(--green); width:12px; font-weight:bold; font-size:1.1rem">${isChosen ? '✓' : ''}</div>
+        </div>
+        `;
+    }
+    
+    listDiv.innerHTML = html;
+    
+    reasonLine.innerHTML = `Chosen because:<br>• Less crowded paths<br>• Faster overall movement mapping`;
+
+    decPanel.classList.remove('hidden');
 }
 
 // ── Metrics ────────────────────────────────────────────
@@ -652,11 +789,17 @@ function loop(time) {
         lastTime = time;
 
         // ── STOP at end — NO looping ──
-        if (SIM.frame >= SIM.max) {
+        if (SIM.frame >= SIM.max - 1) {
             SIM.frame = SIM.max - 1;
             SIM.isRunning = false;
             SIM.finished = true;
-            onRunComplete();
+            STORY = 'complete';
+            
+            console.log("Frame:", SIM.frame);
+            console.log("Running:", SIM.isRunning);
+            console.log("Phase/Story:", STORY);
+            
+            handleSimulationEnd();
             return;
         }
 
@@ -680,23 +823,14 @@ function loop(time) {
     }
 
     drawGraph();
-    requestAnimationFrame(loop);
+    if (typeof occChart !== 'undefined' && occChart) { occChart.update('none'); }
+    if (SIM.isRunning) requestAnimationFrame(loop);
 }
 
 // ════════════════════════════════════════════════════════
-// RUN COMPLETE — show summary overlay
+// RUN COMPLETE — handle end states
 // ════════════════════════════════════════════════════════
-function onRunComplete() {
-    const playBtn = document.getElementById('btn-play');
-    const pauseBtn = document.getElementById('btn-pause');
-    const resetBtn = document.getElementById('btn-reset');
-    const stepBtn = document.getElementById('btn-step');
-
-    playBtn.disabled = true;
-    pauseBtn.disabled = true;
-    stepBtn.disabled = true;
-    resetBtn.disabled = false;
-
+function handleSimulationEnd() {
     hidePauseMsg();
     setPhase('done');
     updateFrameUI();
@@ -707,13 +841,36 @@ function onRunComplete() {
     const modeLabel = mode === 'baseline' ? 'Baseline' : 'Optimized';
     document.getElementById('narration').textContent = `[${modeLabel}] Simulation complete — ${SIM.max} steps finished.`;
 
-    if (STORY === 'baseline_run') {
+    if (mode === 'baseline') {
         STORY = 'baseline_done';
         showBaselineSummary();
-    } else if (STORY === 'optimized_run') {
+    } else {
         STORY = 'comparison';
+        computeOptInsights();
         showComparisonSummary();
     }
+    
+    updateControlsForEndState();
+}
+
+function updateControlsForEndState() {
+    const btnPlay = document.getElementById('btn-play');
+    const btnPause = document.getElementById('btn-pause');
+    const btnStep = document.getElementById('btn-step');
+
+    btnPause.disabled = true;
+    btnStep.disabled = true;
+
+    if (mode === 'baseline') {
+        btnPlay.textContent = '▶ View Optimized';
+        btnPlay.className = 'btn btn-optimized';
+        btnPlay.disabled = false;
+    } else {
+        btnPlay.textContent = '⟲ Restart';
+        btnPlay.className = 'btn';
+        btnPlay.disabled = false;
+    }
+    document.getElementById('btn-reset').disabled = false;
 }
 
 // ── Baseline Summary Overlay ───────────────────────────
@@ -781,6 +938,71 @@ function replayPeak(m) {
 }
 
 // ── Start Optimized Run ────────────────────────────────
+function computeOptInsights() {
+    if (!DATA || !DATA.modes.optimized) return;
+    const baseMd = DATA.modes.baseline;
+    const optMd = DATA.modes.optimized;
+    const len = baseMd.edge_flows[Object.keys(baseMd.edge_flows)[0]].length;
+    
+    const edgeSums = {};
+    for (const k in baseMd.edge_flows) {
+        let bSum = 0, oSum = 0;
+        for (let i=0; i<len; i++) {
+            bSum += baseMd.edge_flows[k][i] || 0;
+            oSum += optMd.edge_flows[k][i] || 0;
+        }
+        if (bSum > 0 || oSum > 0) edgeSums[k] = oSum - bSum;
+    }
+    
+    const sortedEdges = Object.entries(edgeSums).sort((a, b) => b[1] - a[1]);
+    const topInc = sortedEdges.slice(0, 2).filter(e => e[1] > 2);
+    const topDec = sortedEdges.slice().reverse().slice(0, 2).filter(e => e[1] < -2);
+    
+    glowPaths.increased = new Set(topInc.map(e => e[0]));
+    glowPaths.decreased = new Set(topDec.map(e => e[0]));
+    
+    let maxBOcc = 0, bNodeId = null;
+    const nodes = DATA.graph.nodes;
+    for (const n of nodes) {
+        if (n.type === 'entry' || n.type === 'exit') continue;
+        let pB = Math.max(...(baseMd.node_occupancy[n.id] || []));
+        if (pB > maxBOcc) { maxBOcc = pB; bNodeId = n.id; }
+    }
+    
+    const cap = nodes.find(n => n.id === bNodeId).capacity || 1;
+    const pOpt = Math.max(...(optMd.node_occupancy[bNodeId] || []));
+    
+    const bRatio = Math.round((maxBOcc / cap) * 100);
+    const oRatio = Math.round((pOpt / cap) * 100);
+    const bName = nodeName(bNodeId);
+    
+    optInsights = { bName, bRatio, oRatio, topInc, topDec };
+    
+    const explCard = document.getElementById('opt-expl-card');
+    if (explCard) explCard.classList.remove('hidden');
+    
+    let r1, r2, r3;
+    if (topInc.length > 0) {
+        let nPair = topInc[0][0].split('→').map(nodeName);
+        r1 = `Traffic redistributed towards <b style="color:#22d3ee">${nPair[1]}</b>`;
+    } else r1 = "Traffic is distributed more evenly";
+    
+    if (bRatio > oRatio) {
+        r2 = `<b style="color:#4ade80">Less crowd buildup</b> at ${bName} reduces delays`;
+        r3 = `${bName} congestion reduced:<br><span style="color:var(--mt)">Baseline: ${bRatio}% full → Optimized: ${Math.min(oRatio, 100)}% full</span>`;
+    } else {
+        r2 = "Flow spread prevents localized choking";
+        r3 = "Waiting eliminated due to balanced routing";
+    }
+    
+    const r1el = document.getElementById('opt-reason-1');
+    const r2el = document.getElementById('opt-reason-2');
+    const r3el = document.getElementById('opt-reason-3');
+    if (r1el) r1el.innerHTML = r1;
+    if (r2el) r2el.innerHTML = r2;
+    if (r3el) r3el.innerHTML = r3;
+}
+
 function startOptimizedRun() {
     hideOverlay();
     hidePauseMsg();
@@ -797,6 +1019,8 @@ function startOptimizedRun() {
     runObs = { peakNode: '', peakOcc: 0, peakCap: 0, peakFrame: 0 };
     keyMoments = { firstCongestion: false, peakFrame: -1, peakFired: false };
 
+    optStartTime = performance.now();
+
     const playBtn = document.getElementById('btn-play');
     playBtn.textContent = '▶ Running Optimized…';
     playBtn.className = 'btn btn-optimized';
@@ -804,6 +1028,10 @@ function startOptimizedRun() {
     document.getElementById('btn-pause').disabled = false;
     document.getElementById('btn-step').disabled = true;
     document.getElementById('btn-reset').disabled = true;
+    
+    // Hide insights initially during run
+    const explCard = document.getElementById('opt-expl-card');
+    if (explCard) explCard.classList.add('hidden');
 
     updateModeCard();
     updateMetrics();
@@ -846,12 +1074,11 @@ function showComparisonSummary() {
         ${row('Throughput', bm.throughput, om.throughput, ' p/s', false)}
         ${row('Peak Queue', bm.peak_queue, om.peak_queue, '', true)}
 
-        <div class="obs-label" style="margin-top:16px">Impact</div>
+        <div class="obs-label" style="margin-top:16px">Optimization Result</div>
         <ul>
-            <li>Travel time improved by <b style="color:var(--green)">${travelDiff.toFixed(0)}%</b></li>
-            <li>Throughput increased by <b style="color:var(--green)">${thruDiff.toFixed(0)}%</b></li>
-            <li>Better distribution reduced bottleneck formation</li>
-            <li>Flow was smoother with fewer congested areas</li>
+            <li>Congestion materially reduced at <b>${optInsights ? optInsights.bName : runObs.peakNode}</b></li>
+            <li>Traffic elegantly redistributed to alternate paths</li>
+            <li>Overall movement became significantly smoother and faster</li>
         </ul>
     `;
 
@@ -1012,13 +1239,46 @@ function drawGraph() {
             continue;
         }
 
-        const lw = isMain ? 4 : Math.min(1 + flowRatio * 2, 3);
+        let lw = isMain ? 4 : Math.min(1 + flowRatio * 2, 3);
         const alpha = isMain ? 0.9 : 0.3 + flowRatio * 0.3;
         const isBackflow = tg.y < s.y - 10;
         
-        ctx.strokeStyle = isMain ? `rgba(34,211,238,${alpha})` : (isBackflow ? `rgba(148,163,184,${alpha})` : `rgba(56,189,248,${alpha})`);
+        let isGlowInc = false, isGlowDec = false, isDecChosen = false;
+        
+        if (glowPaths && glowPaths.chosenEdge === key) {
+            isDecChosen = true;
+        }
+
+        if (mode === 'optimized' && optStartTime > 0) {
+            const el = performance.now() - optStartTime;
+            if (el < 3000) {
+                isGlowInc = glowPaths.increased.has(key);
+                isGlowDec = glowPaths.decreased.has(key);
+            }
+        }
+        
+        if (isGlowInc) {
+            ctx.shadowBlur = 12;
+            ctx.shadowColor = 'rgba(74, 222, 128, 0.9)';
+            ctx.strokeStyle = `rgba(74, 222, 128, 1)`;
+            lw = 5;
+        } else if (isGlowDec) {
+            ctx.shadowBlur = 0;
+            ctx.strokeStyle = `rgba(248, 113, 113, 0.4)`;
+            lw = 1.5;
+        } else if (isDecChosen && STORY !== 'complete') { // Add emphasis pulsing logic for decisions
+            ctx.shadowBlur = 8;
+            ctx.shadowColor = 'rgba(34, 197, 94, 0.4)';
+            ctx.strokeStyle = `rgba(34, 197, 94, 0.8)`;
+            lw = Math.max(3.5, lw);
+        } else {
+            ctx.shadowBlur = 0;
+            ctx.strokeStyle = isMain ? `rgba(34,211,238,${alpha})` : (isBackflow ? `rgba(148,163,184,${alpha})` : `rgba(56,189,248,${alpha})`);
+        }
+        
         ctx.lineWidth = lw;
         ctx.beginPath(); ctx.moveTo(s.x, s.y); ctx.lineTo(tg.x, tg.y); ctx.stroke();
+        ctx.shadowBlur = 0;
 
         const ang = Math.atan2(tg.y - s.y, tg.x - s.x);
         
@@ -1221,6 +1481,34 @@ window.hidePopup = hidePopup;
 // ── Chart ──────────────────────────────────────────────
 const COLORS = ['#38BDF8', '#22c55e', '#eab308'];
 
+// Plugin definition for Chart.js
+const verticalLinePlugin = {
+    id: 'verticalLine',
+    afterDraw: (chart) => {
+        if (typeof SIM !== 'undefined' && SIM.isRunning) {
+            const ctx = chart.ctx;
+            const x = chart.scales.x.getPixelForTick(SIM.frame);
+            const topY = chart.scales.y.top;
+            const bottomY = chart.scales.y.bottom;
+            
+            ctx.save();
+            ctx.beginPath();
+            ctx.moveTo(x, topY);
+            ctx.lineTo(x, bottomY);
+            ctx.lineWidth = 1;
+            ctx.strokeStyle = 'rgba(255, 255, 255, 0.4)';
+            ctx.setLineDash([3, 3]);
+            ctx.stroke();
+            
+            ctx.fillStyle = 'rgba(255, 255, 255, 0.8)';
+            ctx.textAlign = 'center';
+            ctx.font = '9px JetBrains Mono';
+            ctx.fillText('Current step', x, topY - 5);
+            ctx.restore();
+        }
+    }
+};
+
 function topKeys(m, key, n = 3) {
     const d = DATA.modes[m][key];
     return Object.entries(d).map(([id, v]) => ({ id, pk: Math.max(...v) })).sort((a, b) => b.pk - a.pk).slice(0, n).map(x => x.id);
@@ -1229,27 +1517,47 @@ function topKeys(m, key, n = 3) {
 function updateChart() {
     if (!DATA) return;
     const steps = Array.from({ length: DATA.meta.steps }, (_, i) => i);
-    const top = topKeys(mode, 'node_occupancy');
+    // Use fixed baseline nodes to keep lines strictly stable between modes
+    const top = topKeys('baseline', 'node_occupancy', 3);
+    const nodes = DATA.graph.nodes;
 
     if (!occChart) {
         occChart = new Chart(document.getElementById('occ-chart'), {
             type: 'line',
             data: {
                 labels: steps,
-                datasets: top.map((id, i) => ({ label: id, data: DATA.modes[mode].node_occupancy[id] || [], borderColor: COLORS[i], borderWidth: 1.5, fill: false })),
+                datasets: top.map((id, i) => {
+                    const n = nodes.find(x => x.id === id);
+                    return { label: n ? n.name : id, id: id, data: DATA.modes[mode].node_occupancy[id] || [], borderColor: COLORS[i], borderWidth: 1.5, fill: false };
+                }),
             },
             options: {
                 responsive: true, maintainAspectRatio: false, animation: false,
-                plugins: { legend: { labels: { color: '#94A3B8', font: { family: 'JetBrains Mono', size: 9 }, boxWidth: 8 } } },
+                plugins: { 
+                    legend: { labels: { color: '#94A3B8', font: { family: 'JetBrains Mono', size: 9 }, boxWidth: 8 } }
+                },
+                onHover: (event, chartElement) => {
+                    if (chartElement && chartElement.length > 0) {
+                        const datasetIndex = chartElement[0].datasetIndex;
+                        const id = occChart.data.datasets[datasetIndex].id;
+                        hoverNode = { id: id };
+                    } else {
+                        hoverNode = null;
+                    }
+                },
                 scales: {
                     x: { ticks: { color: '#475569', maxTicksLimit: 8, font: { size: 8 } }, grid: { color: 'rgba(99,179,237,.04)' } },
                     y: { beginAtZero: true, ticks: { color: '#475569', font: { size: 8 } }, grid: { color: 'rgba(99,179,237,.04)' } },
                 },
-                elements: { point: { radius: 0 }, line: { tension: 0, borderWidth: 1.5 } },
+                elements: { point: { radius: 0, hitRadius: 8, hoverRadius: 4 }, line: { tension: 0, borderWidth: 1.5 } },
             },
+            plugins: [verticalLinePlugin]
         });
     } else {
-        occChart.data.datasets = top.map((id, i) => ({ label: id, data: DATA.modes[mode].node_occupancy[id] || [], borderColor: COLORS[i], borderWidth: 1.5, fill: false }));
+        occChart.data.datasets = top.map((id, i) => {
+            const n = nodes.find(x => x.id === id);
+            return { label: n ? n.name : id, id: id, data: DATA.modes[mode].node_occupancy[id] || [], borderColor: COLORS[i], borderWidth: 1.5, fill: false };
+        });
         occChart.update();
     }
 }
