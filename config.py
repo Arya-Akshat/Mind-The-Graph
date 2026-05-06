@@ -1,6 +1,6 @@
 SEED             = 42
 N_STEPS          = 200
-ARRIVAL_RATE     = 2.5       # agents spawned per step at each entry node
+ARRIVAL_RATE     = 15.0      # agents spawned per step at each entry node
 
 # Queue params
 CONGESTION_ALPHA = 0.7       # service slowdown sensitivity (0=none, 1=full)
